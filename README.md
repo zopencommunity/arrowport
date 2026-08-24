@@ -3,14 +3,19 @@
 [Apache Arrow](https://github.com/apache/arrow) C++ 25.0.1, built as a static
 library.
 
-**It builds and works.** `libarrow.a` comes out at about 40 MB, and a program
-linked against it produces correct results on this byte order:
+**The core library builds and works.** `libarrow.a` comes out at about 40 MB,
+and a program linked against it produces correct results on this byte order:
 
 ```
 arrow 25.0.1, len=5, type=int64
 values ok: YES (sum=15000000105, expect 15000000105)
 strings: [z/OS] [arrow]
 ```
+
+**Compression is not finished.** That result is from a core build without the
+codecs. Turning them on gets through configure and 34 files, then stops on
+`posix_memalign` being undeclared in `memory_pool.cc` — see
+[Compression status](#compression-status).
 
 The string array matters as much as the integer one — offsets are where
 endianness actually bites.
@@ -80,6 +85,36 @@ Two traps worth knowing if you use `__tlssim` elsewhere:
   points, and including it inside a namespace namespaces them — which links as
   `_ZN5arrow8internal21__tlsvaranchor_createEm UNRESOLVED`, long after it
   compiled cleanly.
+
+## Compression status
+
+`snappy`, `zstd`, `lz4`, `bzip2`, `zlib` and `utf8proc` are all ported and wired
+up in the buildenv, and the configure now completes with them. Three
+integration problems were solved getting there, each of which reports something
+other than its cause:
+
+| symptom | cause |
+| --- | --- |
+| zoslib's `time.h`: `unknown type name 'time_t'` | `-DCMAKE_CXX_FLAGS` **replaces** what CMake seeds from `$CXXFLAGS`, discarding zoslib's `-isystem`, its `ZOSLIB_OVERRIDE_CLIB` defines and its symbolfixes force-include. Use `ZOPEN_EXTRA_CXXFLAGS` instead. |
+| `IMPORTED_LOCATION not set for BZip2::BZip2` | `FindBZip2` builds the imported target from `BZIP2_LIBRARY_RELEASE`, not the plural `BZIP2_LIBRARIES`. |
+| `IMPORTED_IMPLIB not set for zstd::libzstd_shared` | Arrow was selecting the *shared* target from each dependency's CMake config; an imported SHARED target here wants a side-deck as its import library, which static-only ports do not ship. `ARROW_DEPENDENCY_USE_SHARED=OFF`. |
+
+What remains is:
+
+```
+memory_pool.cc:318: error: use of undeclared identifier 'posix_memalign'
+```
+
+Not yet explained. `posix_memalign` **is** declared on this platform under every
+combination tried — no feature macros, `_XOPEN_SOURCE=600`, `_ALL_SOURCE`,
+`_XOPEN_SOURCE_EXTENDED`, `_POSIX_C_SOURCE`, and also with zoslib's
+`-isystem` path and `ZOSLIB_OVERRIDE_CLIB` defines applied. zoslib's own
+`stdlib.h` declares it. `memory_pool.cc` includes `<cstdlib>`.
+
+So the difference is something in the full build's include set rather than a
+missing declaration, and the obvious candidates are ruled out. The core build
+that produced the working library above did **not** carry zoslib's overrides,
+which is the main thing that differs.
 
 ## The configure recipe## The configure recipe
 
@@ -151,11 +186,13 @@ beside `_AIX`.
 
 ## Next steps
 
-1. Turn the compression codecs back on — `snappy`, `zstd`, `lz4` and `brotli`
-   are all ported and the core now builds without them.
-2. **Run Arrow's own test suite.** Everything above says the library compiles
-   and that two array types round-trip correctly; it does not say the byte-order
-   paths are right everywhere. Arrow's suite is the only thing that will, and it
-   should run before any pyarrow work rather than after.
-3. Then pyarrow, which needs `ARROW_COMPUTE` and probably `ARROW_PARQUET`
-   (and therefore thrift) switched on.
+1. Resolve the `posix_memalign` declaration failure. Reproduce it by compiling
+   `memory_pool.cc` alone with the port's exact flags, then bisect the include
+   set — `arrow/memory_pool_internal.h` is the first include and the least
+   examined.
+2. Then Arrow's own test suite, which is currently parked (see the buildenv for
+   why and for exactly what to change). Everything established so far is that
+   the library builds and that two array types round-trip; that is not the same
+   as every byte-order path being right on a big-endian machine.
+3. Then pyarrow, which additionally needs `ARROW_COMPUTE` and probably
+   `ARROW_PARQUET` — and therefore thrift.
