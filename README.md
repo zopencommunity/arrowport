@@ -35,22 +35,65 @@ release for nothing. This is the same shape as `lapack`/`blis` → `scipy`.
 
 ## What is blocking it
 
-### 1. No thread-local storage
+### 1. No thread-local storage — mostly solved
 
+This compiler supports no TLS of any kind. `thread_local`, `_Thread_local` and
+`__thread` are all rejected, and **no `-mzos-target` level changes that** —
+`-mzos-target=zosv3r1` is accepted and does move `__TARGET_LIB__` to
+`0x43010000`, but TLS is a code-generation capability the z/OS target does not
+implement, not a library-level feature gated on z/OS release.
+
+The good news is how little of Arrow needs it. Across all of Arrow C++ there
+are 109 occurrences in 14 files, but nearly all are in components a core build
+turns off:
+
+| component | occurrences | in a core build? |
+| --- | --- | --- |
+| Acero (`tpch_node.cc`, `bloom_filter*`) | 94 | no |
+| Flight / ODBC | 11 | no |
+| tests and benchmarks | 2 | no |
+| **`util/thread_pool.cc`** | 1 | **yes** |
+| **`vendored/datetime/tz.cpp`** | 1 | **yes** |
+| comments only | 3 | — |
+
+So a core build needs **two** variables fixed, not 109.
+
+The fix is zoslib's `__tlssim<T>` from `<zos-tls.h>`, which simulates
+thread-local storage over a pthread key. It is the right tool rather than
+`-Dthread_local=`, which some ports use: defining the keyword away compiles,
+but makes every thread share one variable. Measured, with two threads
+incrementing a counter 1000 times each:
+
+| approach | main thread sees | correct? |
+| --- | --- | --- |
+| `-Dthread_local=` | 2000 | no — one shared variable |
+| `__tlssim` | 0 | yes — per-thread copies |
+
+**`thread_pool.cc` is fixed** this way, and it matters that it is fixed
+properly: `current_thread_pool_` is how a pool recognises its own worker
+threads, so sharing it across threads would not be a subtle inefficiency.
+
+**`tz.cpp` is not fixed yet.** `__tlssim<T>` copy-constructs its initial value:
+
+```cpp
+__tlssim(const T &initvalue) : v(initvalue)     // zos-tls.h:31
 ```
-src/arrow/vendored/datetime/tz.cpp:3984:5:
-error: thread-local storage is not supported for the current target
+
+and the type it has to hold refuses to be copied:
+
+```cpp
+recursion_limiter(recursion_limiter const&) = delete;   // tz.cpp:3928
 ```
 
-This compiler supports no TLS of any kind — `thread_local`, `_Thread_local`
-and `__thread` are all rejected. It is the same wall the greenlet port hit, and
-the same fix applies: a `pthread_key_create` destructor gives the semantics
-that matter (created on first use per thread, destroyed at thread exit).
+It has no default constructor either — only `explicit constexpr
+recursion_limiter(unsigned)` — so neither `__tlssim` constructor applies.
+Options, in preference order:
 
-The file is Howard Hinnant's date library, vendored into Arrow at
-`cpp/src/arrow/vendored/datetime/`. Worth checking first whether the timezone
-database can simply be switched off for a minimal build, since nothing in the
-core needs it.
+1. Switch the timezone database off for a core build, if Arrow allows it.
+   Nothing in core needs it and the whole problem disappears.
+2. Hold `__tlssim<recursion_limiter*>` and allocate lazily per thread.
+   Works, at the cost of one small leaked object per thread.
+3. Keep the limiter's state (two `unsigned`s) in TLS rather than the object.
 
 ### 2. `struct tm` has no `tm_gmtoff`
 
@@ -134,10 +177,10 @@ beside `_AIX`.
 
 ## Next steps
 
-1. Decide whether the vendored timezone database can be switched off for a core
-   build. If not, apply the pthread-key shim from `greenletport`.
+1. Resolve `tz.cpp` — try switching the timezone database off first; fall back
+   to a `__tlssim<recursion_limiter*>` holding a lazily allocated object.
 2. Patch `value_parsing.h` to compute the UTC offset without `tm_gmtoff`.
 3. Get the core building, then **run Arrow's own test suite before touching
-   pyarrow**. The dependencies are tractable; the real unknown is how many
-   places assume little-endian outside the paths s390x CI exercises, and only
-   the test suite will answer that.
+   pyarrow**. The dependencies are tractable and every error so far has been
+   shallow; the real unknown is how many places assume little-endian outside
+   the paths s390x CI exercises, and only the test suite will answer that.
