@@ -3,12 +3,20 @@
 [Apache Arrow](https://github.com/apache/arrow) C++ 25.0.1, built as a static
 library.
 
-> [!WARNING]
-> **This does not build yet.** It configures cleanly and 60 source files
-> compile before two blockers stop it, both recorded below with their exact
-> errors. The port exists so the configure recipe — which took several rounds
-> to find, and none of whose settings are guessable — is written down and
-> reproducible.
+**It builds and works.** `libarrow.a` comes out at about 40 MB, and a program
+linked against it produces correct results on this byte order:
+
+```
+arrow 25.0.1, len=5, type=int64
+values ok: YES (sum=15000000105, expect 15000000105)
+strings: [z/OS] [arrow]
+```
+
+The string array matters as much as the integer one — offsets are where
+endianness actually bites.
+
+Six patches were needed. Every one is a platform difference rather than an
+Arrow bug, and none of them touches Arrow's logic.
 
 ## Why this is separate from pyarrow
 
@@ -26,88 +34,54 @@ Beyond that: Arrow C++ is interpreter-independent while pyarrow builds a wheel
 per ABI, so bundling would rebuild a very large C++ project three times per
 release for nothing. This is the same shape as `lapack`/`blis` → `scipy`.
 
-## How far it gets
+## The patches
 
-| stage | result |
+| file | why |
 | --- | --- |
-| CMake configure | ✅ 380 status lines, `Configuring done` / `Generating done` |
-| compile | 60 files, then 2 errors |
+| `util/endian.h` | includes `<endian.h>` for anything that is not Apple, FreeBSD, Solaris, AIX or QNX. z/OS has no such header — one line adding `__MVS__` beside `_AIX`. |
+| `util/value_parsing.h` | uses `tm.tm_gmtoff`, which does not exist on z/OS **under any feature-test macro**. Arrow already guards this with `#if !defined(_WIN32) && !defined(_AIX)` — the same platforms that lack it — so the fix is adding `__MVS__` to Arrow's own existing list. |
+| `util/io_util.cc` | `pthread_kill((pthread_t)thread_id, ...)`. Arrow's comment says pthread_t "can be a pointer *or* integer type"; on z/OS it is a **struct**, so no cast works. `GetThreadId()` builds the id by memcpy-ing a `std::thread::id`, so memcpy back is the exact inverse. |
+| `util/thread_pool.cc` | `thread_local ThreadPool* current_thread_pool_`. Replaced with zoslib's `__tlssim`. |
+| `vendored/datetime/tz.cpp` | `thread_local recursion_limiter rc{10}`. Also `__tlssim`, but held as a pointer — see below. |
+| `vendored/fast_float/bigint.h` | z/OS `<strings.h>` defines **`rindex` as a macro**, and fast_float has a method of that name. One `#undef`. |
 
-## What is blocking it
+### Thread-local storage
 
-### 1. No thread-local storage — mostly solved
+This compiler supports none — `thread_local`, `_Thread_local` and `__thread`
+are all rejected, and no `-mzos-target` level changes that (`zosv3r1` is
+accepted and does move `__TARGET_LIB__` to `0x43010000`; TLS is a
+code-generation capability the target does not implement, not a library-level
+feature).
 
-This compiler supports no TLS of any kind. `thread_local`, `_Thread_local` and
-`__thread` are all rejected, and **no `-mzos-target` level changes that** —
-`-mzos-target=zosv3r1` is accepted and does move `__TARGET_LIB__` to
-`0x43010000`, but TLS is a code-generation capability the z/OS target does not
-implement, not a library-level feature gated on z/OS release.
+Arrow has 109 `thread_local` occurrences across 14 files, but a core build
+reaches **two** — 94 are in Acero, 11 in Flight/ODBC, 2 in tests, and 3 are
+comments.
 
-The good news is how little of Arrow needs it. Across all of Arrow C++ there
-are 109 occurrences in 14 files, but nearly all are in components a core build
-turns off:
-
-| component | occurrences | in a core build? |
-| --- | --- | --- |
-| Acero (`tpch_node.cc`, `bloom_filter*`) | 94 | no |
-| Flight / ODBC | 11 | no |
-| tests and benchmarks | 2 | no |
-| **`util/thread_pool.cc`** | 1 | **yes** |
-| **`vendored/datetime/tz.cpp`** | 1 | **yes** |
-| comments only | 3 | — |
-
-So a core build needs **two** variables fixed, not 109.
-
-The fix is zoslib's `__tlssim<T>` from `<zos-tls.h>`, which simulates
-thread-local storage over a pthread key. It is the right tool rather than
+Both are fixed with zoslib's `__tlssim<T>` from `<zos-tls.h>`, which simulates
+thread-local storage over a pthread key. That is the right tool rather than
 `-Dthread_local=`, which some ports use: defining the keyword away compiles,
-but makes every thread share one variable. Measured, with two threads
-incrementing a counter 1000 times each:
+but every thread then shares one variable. Measured, two threads incrementing a
+counter 1000 times each:
 
 | approach | main thread sees | correct? |
 | --- | --- | --- |
-| `-Dthread_local=` | 2000 | no — one shared variable |
-| `__tlssim` | 0 | yes — per-thread copies |
+| `-Dthread_local=` | 2000 | no |
+| `__tlssim` | 0 | yes |
 
-**`thread_pool.cc` is fixed** this way, and it matters that it is fixed
-properly: `current_thread_pool_` is how a pool recognises its own worker
-threads, so sharing it across threads would not be a subtle inefficiency.
+That distinction is load-bearing here: `current_thread_pool_` is how a pool
+recognises its own worker threads.
 
-**`tz.cpp` is not fixed yet.** `__tlssim<T>` copy-constructs its initial value:
+Two traps worth knowing if you use `__tlssim` elsewhere:
 
-```cpp
-__tlssim(const T &initvalue) : v(initvalue)     // zos-tls.h:31
-```
+* **It copy-constructs its initial value.** `recursion_limiter` deletes its copy
+  constructor and has no default one, so it cannot be held directly; the patch
+  holds `__tlssim<recursion_limiter*>` and allocates on first use per thread.
+* **Include `<zos-tls.h>` at file scope.** It declares `extern "C"` entry
+  points, and including it inside a namespace namespaces them — which links as
+  `_ZN5arrow8internal21__tlsvaranchor_createEm UNRESOLVED`, long after it
+  compiled cleanly.
 
-and the type it has to hold refuses to be copied:
-
-```cpp
-recursion_limiter(recursion_limiter const&) = delete;   // tz.cpp:3928
-```
-
-It has no default constructor either — only `explicit constexpr
-recursion_limiter(unsigned)` — so neither `__tlssim` constructor applies.
-Options, in preference order:
-
-1. Switch the timezone database off for a core build, if Arrow allows it.
-   Nothing in core needs it and the whole problem disappears.
-2. Hold `__tlssim<recursion_limiter*>` and allocate lazily per thread.
-   Works, at the cost of one small leaked object per thread.
-3. Keep the limiter's state (two `unsigned`s) in TLS rather than the object.
-
-### 2. `struct tm` has no `tm_gmtoff`
-
-```
-src/arrow/util/value_parsing.h:837:41:
-error: no member named 'tm_gmtoff' in 'tm'
-```
-
-`tm_gmtoff` is a BSD/glibc extension. It does not exist on z/OS **under any
-feature-test macro** — checked with `_ALL_SOURCE`, `_XOPEN_SOURCE_EXTENDED` and
-both together. So this needs a real patch computing the UTC offset another way,
-not a define.
-
-## The configure recipe
+## The configure recipe## The configure recipe
 
 Every one of these was found by hitting the failure it prevents. The failures
 are recorded because none of them names its own cause.
@@ -177,10 +151,11 @@ beside `_AIX`.
 
 ## Next steps
 
-1. Resolve `tz.cpp` — try switching the timezone database off first; fall back
-   to a `__tlssim<recursion_limiter*>` holding a lazily allocated object.
-2. Patch `value_parsing.h` to compute the UTC offset without `tm_gmtoff`.
-3. Get the core building, then **run Arrow's own test suite before touching
-   pyarrow**. The dependencies are tractable and every error so far has been
-   shallow; the real unknown is how many places assume little-endian outside
-   the paths s390x CI exercises, and only the test suite will answer that.
+1. Turn the compression codecs back on — `snappy`, `zstd`, `lz4` and `brotli`
+   are all ported and the core now builds without them.
+2. **Run Arrow's own test suite.** Everything above says the library compiles
+   and that two array types round-trip correctly; it does not say the byte-order
+   paths are right everywhere. Arrow's suite is the only thing that will, and it
+   should run before any pyarrow work rather than after.
+3. Then pyarrow, which needs `ARROW_COMPUTE` and probably `ARROW_PARQUET`
+   (and therefore thrift) switched on.

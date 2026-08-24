@@ -9,13 +9,15 @@ ARROW_VERSION="25.0.1"
 ### pyarrow builds a wheel per ABI; bundling would rebuild a very large C++
 ### project three times for nothing.
 ###
-### THIS PORT DOES NOT BUILD YET. It configures, and 60 source files compile
-### before two blockers stop it. Both are recorded in the README with the exact
-### errors. The port exists so the configure recipe below -- which took several
-### rounds to find and none of whose settings are guessable -- is written down
-### and reproducible.
+### It builds. libarrow.a comes out at ~40 MB and a program linked against it
+### produces correct results on this byte order -- int64 arithmetic and string
+### offsets both verified, the latter being where endianness actually bites.
 ###
-### The settings that are load-bearing, in the order they were discovered:
+### Six patches were needed, all of them platform differences rather than Arrow
+### bugs; patches/arrow-25.0.1-zos.patch carries them and the README explains
+### each one.
+###
+### The settings that are load-bearing### The settings that are load-bearing, in the order they were discovered:
 ###
 ###   ARROW_CPU_FLAG=s390x
 ###     CMake reports CMAKE_SYSTEM_PROCESSOR as the machine type ("8561"),

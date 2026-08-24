@@ -1,3 +1,5 @@
+diff --git a/cpp/src/arrow/util/endian.h b/cpp/src/arrow/util/endian.h
+index 1edb828..024796c 100644
 --- a/cpp/src/arrow/util/endian.h
 +++ b/cpp/src/arrow/util/endian.h
 @@ -24,7 +24,7 @@
@@ -9,3 +11,133 @@
  #    include <endian.h>  // IWYU pragma: keep
  #  endif
  #
+diff --git a/cpp/src/arrow/util/io_util.cc b/cpp/src/arrow/util/io_util.cc
+index 03acd82..eebd284 100644
+--- a/cpp/src/arrow/util/io_util.cc
++++ b/cpp/src/arrow/util/io_util.cc
+@@ -2101,7 +2101,20 @@ Status SendSignalToThread(int signum, uint64_t thread_id) {
+   return Status::NotImplemented("Cannot send signal to specific thread on Windows");
+ #else
+   // Have to use a C-style cast because pthread_t can be a pointer *or* integer type
++#  if defined(__MVS__)
++  // ...or, on z/OS, a struct:
++  //     typedef struct { unsigned long long __; } pthread_t;
++  // which no cast from uint64_t can produce. GetThreadId() above builds its
++  // value by memcpy-ing a std::thread::id -- which wraps pthread_t here -- into
++  // a uint64_t, so memcpy is the exact inverse of how the id was made.
++  pthread_t native_tid;
++  static_assert(sizeof(native_tid) <= sizeof(thread_id),
++                "pthread_t does not fit in the uint64_t thread id");
++  memcpy(&native_tid, &thread_id, sizeof(native_tid));
++  int r = pthread_kill(native_tid, signum);
++#  else
+   int r = pthread_kill((pthread_t)thread_id, signum);  // NOLINT readability-casting
++#  endif
+   if (r == 0) {
+     return Status::OK();
+   }
+diff --git a/cpp/src/arrow/util/thread_pool.cc b/cpp/src/arrow/util/thread_pool.cc
+index 4fbce97..d2c9d70 100644
+--- a/cpp/src/arrow/util/thread_pool.cc
++++ b/cpp/src/arrow/util/thread_pool.cc
+@@ -35,6 +35,13 @@
+ 
+ #include "arrow/util/tracing_internal.h"
+ 
++#ifdef __MVS__
++// At file scope on purpose: zos-tls.h declares extern "C" entry points,
++// and including it inside namespace arrow::internal namespaces them, which
++// links as _ZN5arrow8internal21__tlsvaranchor_createEm UNRESOLVED.
++#include <zos-tls.h>
++#endif
++
+ namespace arrow {
+ namespace internal {
+ 
+@@ -684,7 +691,18 @@ static void SetCurrentThreadPool(ThreadPool* pool) {
+   }
+ }
+ #  else
++#    ifdef __MVS__
++// z/OS has no thread-local storage of any kind: thread_local, _Thread_local and
++// __thread are all rejected by the compiler, and no -mzos-target level changes
++// that. The __tlssim template from zoslib simulates it over a pthread key,
++// which preserves the semantics that matter here -- one ThreadPool pointer per
++// thread. Defining thread_local away instead would make every thread share one
++// pointer, and this variable is how a pool recognises its own worker threads.
++static __tlssim<ThreadPool*> current_thread_pool_tls_(nullptr);
++#      define current_thread_pool_ (*current_thread_pool_tls_.access())
++#    else
+ thread_local ThreadPool* current_thread_pool_ = nullptr;
++#    endif
+ 
+ static ThreadPool* GetCurrentThreadPool() { return current_thread_pool_; }
+ static void SetCurrentThreadPool(ThreadPool* pool) { current_thread_pool_ = pool; }
+diff --git a/cpp/src/arrow/util/value_parsing.h b/cpp/src/arrow/util/value_parsing.h
+index 195cdc8..50cbac8 100644
+--- a/cpp/src/arrow/util/value_parsing.h
++++ b/cpp/src/arrow/util/value_parsing.h
+@@ -833,7 +833,7 @@ static inline bool ParseTimestampStrptime(const char* buf, size_t length,
+   if (!ignore_time_in_day) {
+     secs += (std::chrono::hours(result.tm_hour) + std::chrono::minutes(result.tm_min) +
+              std::chrono::seconds(result.tm_sec));
+-#if !defined(_WIN32) && !defined(_AIX)
++#if !defined(_WIN32) && !defined(_AIX) && !defined(__MVS__)
+     secs -= std::chrono::seconds(result.tm_gmtoff);
+ #endif
+   }
+diff --git a/cpp/src/arrow/vendored/datetime/tz.cpp b/cpp/src/arrow/vendored/datetime/tz.cpp
+index 2cf6c62..d6673f2 100644
+--- a/cpp/src/arrow/vendored/datetime/tz.cpp
++++ b/cpp/src/arrow/vendored/datetime/tz.cpp
+@@ -116,6 +116,9 @@ struct index_entry_t {
+ #if USE_OS_TZDB
+ #  include <dirent.h>
+ #endif
++#ifdef __MVS__
++#include <zos-tls.h>
++#endif
+ #include <algorithm>
+ #include <cctype>
+ #include <cstdlib>
+@@ -3981,7 +3984,21 @@ tzdb::locate_zone(const std::string& tz_name) const
+ #endif
+ {
+     // If a link-to-link chain exceeds this limit, give up
++#ifdef __MVS__
++    // See the note in arrow/util/thread_pool.cc: no thread-local storage on
++    // this platform. The limiter counts recursion depth per thread, so sharing
++    // one across threads would let concurrent lookups trip each other limit.
++    // recursion_limiter deletes its copy constructor and has no default one,
++    // so __tlssim cannot hold it directly -- __tlssim copy-constructs its
++    // initial value. Hold a pointer per thread and build the object on first
++    // use in that thread instead.
++    static __tlssim<recursion_limiter*> rc_tls_(nullptr);
++    recursion_limiter*& rc_p_ = *rc_tls_.access();
++    if (rc_p_ == nullptr) rc_p_ = new recursion_limiter(10);
++    recursion_limiter& rc = *rc_p_;
++#else
+     thread_local recursion_limiter rc{10};
++#endif
+     auto restore_count = rc.count();
+ 
+     auto zi = std::lower_bound(zones.begin(), zones.end(), tz_name,
+diff --git a/cpp/src/arrow/vendored/fast_float/bigint.h b/cpp/src/arrow/vendored/fast_float/bigint.h
+index f3503e2..99efdd0 100644
+--- a/cpp/src/arrow/vendored/fast_float/bigint.h
++++ b/cpp/src/arrow/vendored/fast_float/bigint.h
+@@ -8,6 +8,14 @@
+ 
+ #include "float_common.h"
+ 
++#ifdef __MVS__
++// <strings.h> defines rindex as a macro here --
++//   #define rindex(x,y) __EDC_BIL(strrchr)(x,(unsigned char)(y))
++// -- which clobbers the member function of the same name below. The
++// legacy BSD rindex() is not used by this header.
++#undef rindex
++#endif
++
+ namespace arrow_vendored {
+ namespace fast_float {
+ 
