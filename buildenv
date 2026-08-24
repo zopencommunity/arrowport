@@ -98,6 +98,7 @@ export ZOPEN_CONFIGURE_OPTS="-S cpp -B ../build --install-prefix \"\$ZOPEN_INSTA
  -DCMAKE_AR=/bin/ar -DCMAKE_RANLIB=/bin/true \
  -DARROW_CPU_FLAG=s390x \
  -DARROW_DEPENDENCY_SOURCE=SYSTEM -Dxsimd_SOURCE=SYSTEM \
+ -DCMAKE_PREFIX_PATH=\"\$XSIMD_HOME\" \
  -DLZ4_LIB=\$LZ4_HOME/lib/liblz4.a -DLZ4_INCLUDE_DIR=\$LZ4_HOME/include \
  -DSnappy_LIB=\$SNAPPY_HOME/lib/libsnappy.a -DSnappy_INCLUDE_DIR=\$SNAPPY_HOME/include \
  -DZSTD_LIB=\$ZSTD_HOME/lib/libzstd.a -DZSTD_INCLUDE_DIR=\$ZSTD_HOME/include \
