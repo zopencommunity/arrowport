@@ -99,22 +99,58 @@ other than its cause:
 | `IMPORTED_LOCATION not set for BZip2::BZip2` | `FindBZip2` builds the imported target from `BZIP2_LIBRARY_RELEASE`, not the plural `BZIP2_LIBRARIES`. |
 | `IMPORTED_IMPLIB not set for zstd::libzstd_shared` | Arrow was selecting the *shared* target from each dependency's CMake config; an imported SHARED target here wants a side-deck as its import library, which static-only ports do not ship. `ARROW_DEPENDENCY_USE_SHARED=OFF`. |
 
-What remains is:
+Two more were found and fixed, both the same root cause in different places:
+
+### posix_memalign is poisoned below z/OS 3.1
+
+```c
+// zoslib/include/stdlib.h
+// LE fix since posix_memalign is exposed in 2.5
+#if (__TARGET_LIB__ < 0x43010000)
+#define posix_memalign __posix_memalign_replaced
+#endif
+```
+
+`__posix_memalign_replaced` is never declared anywhere and is not in
+`libzoslib.a`, so the name is effectively poisoned and any use fails to
+compile. It takes **both** `ZOSLIB_OVERRIDE_CLIB=1` and `-mzos-target=zosv2r5`
+to bite — removing either makes it compile — which is why it survives casual
+testing of each. zopen targets `zosv2r5` by default, so this is the ordinary
+case here.
+
+The replacement is `aligned_alloc`, whose result is released with plain
+`free()` — which is what both call sites already do, so ownership does not
+change. One measured detail matters: **z/OS enforces the C11 rule** that the
+size be an integer multiple of the alignment.
+
+| call | result |
+| --- | --- |
+| `aligned_alloc(64, 100)` | **NULL** |
+| `aligned_alloc(64, 128)` | ok, correctly aligned |
+| `aligned_alloc(4096, 4096)` | ok, correctly aligned |
+
+Most platforms relax that. Both patches therefore round the request up, padding
+only the allocation and not the accounting.
+
+Arrow has exactly one real call site (`memory_pool.cc`; the other mention is a
+comment in vendored xxhash). **xsimd has one too**, and that one is fixed in
+`xsimdport` rather than here, so the next consumer of xsimd does not meet it.
+
+### Still open: align_util.cc
 
 ```
-memory_pool.cc:318: error: use of undeclared identifier 'posix_memalign'
+arrow/util/align_util.cc
+  zoslib .../include/time.h:56: error: unknown type name 'time_t'
+  libc++ __functional/hash.h:37: error: reference to unresolved using declaration
+  libc++ ratio:142: error: use of undeclared identifier 'CHAR_BIT'
 ```
 
-Not yet explained. `posix_memalign` **is** declared on this platform under every
-combination tried — no feature macros, `_XOPEN_SOURCE=600`, `_ALL_SOURCE`,
-`_XOPEN_SOURCE_EXTENDED`, `_POSIX_C_SOURCE`, and also with zoslib's
-`-isystem` path and `ZOSLIB_OVERRIDE_CLIB` defines applied. zoslib's own
-`stdlib.h` declares it. `memory_pool.cc` includes `<cstdlib>`.
-
-So the difference is something in the full build's include set rather than a
-missing declaration, and the obvious candidates are ruled out. The core build
-that produced the working library above did **not** carry zoslib's overrides,
-which is the main thing that differs.
+A cascade rather than a missing symbol — `CHAR_BIT` comes from `<climits>`, so
+the translation unit's include chain is being broken early rather than one
+function being absent. Not yet diagnosed. Worth checking whether the
+force-included headers this build carries (zoslib's symbolfixes and xsimd's
+z/OS defaults) interact badly in this particular unit, since it is the first
+file to fail this way.
 
 ## The configure recipe## The configure recipe
 
