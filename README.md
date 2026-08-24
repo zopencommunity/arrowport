@@ -3,8 +3,9 @@
 [Apache Arrow](https://github.com/apache/arrow) C++ 25.0.1, built as a static
 library.
 
-**The core library builds and works.** `libarrow.a` comes out at about 40 MB,
-and a program linked against it produces correct results on this byte order:
+**It builds, with compression, and works.** `libarrow.a` comes out at about
+40 MB from 170 source files, and a program linked against it produces correct
+results on this byte order:
 
 ```
 arrow 25.0.1, len=5, type=int64
@@ -12,16 +13,24 @@ values ok: YES (sum=15000000105, expect 15000000105)
 strings: [z/OS] [arrow]
 ```
 
-**Compression is not finished.** That result is from a core build without the
-codecs. Turning them on gets through configure and 34 files, then stops on
-`posix_memalign` being undeclared in `memory_pool.cc` — see
-[Compression status](#compression-status).
-
 The string array matters as much as the integer one — offsets are where
 endianness actually bites.
 
-Six patches were needed. Every one is a platform difference rather than an
-Arrow bug, and none of them touches Arrow's logic.
+Compression round-trips correctly through the ported codecs:
+
+| codec | 88000 bytes -> | result |
+| --- | --- | --- |
+| snappy | 4216 | identical |
+| zstd | 66 | identical |
+| lz4 | 429 | identical |
+| gzip (zlib) | 336 | identical |
+| bz2 | — | not exercisable here, see below |
+
+`bz2` is not a failure. Arrow implements it **only** through the streaming
+interface — `compression_bz2.cc` returns `Status::NotImplemented("One-shot bz2
+compression not supported")` on every platform — and the compressed-stream
+classes are not part of this core-only component set. It is enabled and linked;
+there is simply no way to drive it until more components are turned on.
 
 ## Why this is separate from pyarrow
 
