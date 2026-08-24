@@ -164,6 +164,41 @@ export ZOPEN_INSTALL_OPTS="--install ../build"
 #   ZOPEN_CHECK_OPTS="--test-dir ../build --output-on-failure"
 export ZOPEN_CHECK="skip"
 
+# Drop the duplicate zoslib include path before configuring.
+#
+# zopen puts zoslib's headers on the search path twice: once through the merged
+# /data/zopen/usr/local/include, which is a tree of symlinks, and again through
+# zoslib's own -isystem. Both resolve to the same files, and the pair breaks
+# #include_next.
+#
+# zoslib's time.h is the one that shows it. It is reached as
+#
+#   libc++ wchar.h -> /usr/include/wchar.h -> <time.h>
+#
+# which lands on the symlink in the merged directory. That file does
+# "#include_next <time.h>" to chain to the real system header -- but the next
+# time.h on the path is zoslib's own copy, whose include guard is already set,
+# so it expands to nothing. /usr/include/time.h is never reached, time_t is
+# never defined, and the failure surfaces as
+#
+#   zoslib/include/time.h:56: error: unknown type name 'time_t'
+#
+# followed by a cascade through libc++ (CHAR_BIT undeclared in <ratio>,
+# unresolved using declarations in <hash.h>) that looks nothing like an include
+# path problem.
+#
+# Removing the second copy fixes it, and costs nothing: the merged directory
+# still exposes every zoslib header, <zos-tls.h> included -- verified.
+zopen_pre_configure() {
+  if [ -n "${ZOSLIB_HOME}" ]; then
+    CFLAGS=$(echo " ${CFLAGS} " | sed -e "s| -isystem ${ZOSLIB_HOME}/include | |g")
+    CXXFLAGS=$(echo " ${CXXFLAGS} " | sed -e "s| -isystem ${ZOSLIB_HOME}/include | |g")
+    export CFLAGS CXXFLAGS
+    printInfo "- dropped the duplicate zoslib include path (breaks #include_next)"
+  fi
+  return 0
+}
+
 zopen_check_results() {
 cat <<ZZ
 actualFailures:0
