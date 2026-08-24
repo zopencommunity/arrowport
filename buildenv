@@ -83,6 +83,11 @@ export ZOPEN_EXTRA_CXXFLAGS="-faligned-allocation"
 # Arrow's CMakeLists is in cpp/, not at the top of the repo.
 #
 # The compression libraries are named explicitly rather than left to discovery.
+# BZip2 needs BZIP2_LIBRARY_RELEASE specifically, not just BZIP2_LIBRARIES:
+# CMake FindBZip2 builds the BZip2::BZip2 imported target from the former, and
+# without it the configure fails late with
+#   IMPORTED_LOCATION not set for imported target "BZip2::BZip2"
+# rather than with anything saying the library was not found.
 # Arrow's Find*Alt modules build library names that do not match what these
 # ports install, so a plain prefix path finds the headers and then reports
 # "Could NOT find lz4Alt (missing: LZ4_LIB)". The *_HOME variables come from
@@ -103,6 +108,7 @@ export ZOPEN_CONFIGURE_OPTS="-S cpp -B ../build --install-prefix \"\$ZOPEN_INSTA
  -DSnappy_LIB=\$SNAPPY_HOME/lib/libsnappy.a -DSnappy_INCLUDE_DIR=\$SNAPPY_HOME/include \
  -DZSTD_LIB=\$ZSTD_HOME/lib/libzstd.a -DZSTD_INCLUDE_DIR=\$ZSTD_HOME/include \
  -Dutf8proc_LIB=\$UTF8PROC_HOME/lib/libutf8proc.a -Dutf8proc_INCLUDE_DIR=\$UTF8PROC_HOME/include \
+ -DBZIP2_LIBRARY_RELEASE=\$BZIP2_HOME/lib/libbz2.a \
  -DBZIP2_LIBRARIES=\$BZIP2_HOME/lib/libbz2.a -DBZIP2_INCLUDE_DIR=\$BZIP2_HOME/include \
  -DZLIB_LIBRARY=\$ZLIB_HOME/lib/libz.a -DZLIB_INCLUDE_DIR=\$ZLIB_HOME/include \
  -DARROW_BUILD_SHARED=OFF -DARROW_BUILD_STATIC=ON \
