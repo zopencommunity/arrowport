@@ -82,6 +82,12 @@ export ZOPEN_EXTRA_CXXFLAGS="-faligned-allocation"
 
 # Arrow's CMakeLists is in cpp/, not at the top of the repo.
 #
+# ARROW_DEPENDENCY_USE_SHARED=OFF makes Arrow pick the static target out of each
+# dependency CMake config. Left on, it selects the shared ones -- and an imported
+# SHARED target on this platform wants a side-deck as its import library, which
+# these static-only ports do not ship:
+#   IMPORTED_IMPLIB not set for imported target "zstd::libzstd_shared"
+#
 # The compression libraries are named explicitly rather than left to discovery.
 # BZip2 needs BZIP2_LIBRARY_RELEASE specifically, not just BZIP2_LIBRARIES:
 # CMake FindBZip2 builds the BZip2::BZip2 imported target from the former, and
@@ -103,6 +109,7 @@ export ZOPEN_CONFIGURE_OPTS="-S cpp -B ../build --install-prefix \"\$ZOPEN_INSTA
  -DCMAKE_AR=/bin/ar -DCMAKE_RANLIB=/bin/true \
  -DARROW_CPU_FLAG=s390x \
  -DARROW_DEPENDENCY_SOURCE=SYSTEM -Dxsimd_SOURCE=SYSTEM \
+ -DARROW_DEPENDENCY_USE_SHARED=OFF \
  -DCMAKE_PREFIX_PATH=\"\$XSIMD_HOME\" \
  -DLZ4_LIB=\$LZ4_HOME/lib/liblz4.a -DLZ4_INCLUDE_DIR=\$LZ4_HOME/include \
  -DSnappy_LIB=\$SNAPPY_HOME/lib/libsnappy.a -DSnappy_INCLUDE_DIR=\$SNAPPY_HOME/include \
