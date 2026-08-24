@@ -61,11 +61,13 @@ export ZOPEN_CATEGORIES="development library"
 
 export ZOPEN_STABLE_URL="https://github.com/apache/arrow.git"
 export ZOPEN_STABLE_TAG="apache-arrow-${ARROW_VERSION}"
-export ZOPEN_STABLE_DEPS="zoslib make cmake xsimd snappy utf8proc zstd lz4 bzip2 zlib googletest"
+export ZOPEN_STABLE_DEPS="zoslib make cmake xsimd snappy utf8proc zstd lz4 bzip2 zlib googletest boost"
 
 export ZOPEN_DEV_URL="https://github.com/apache/arrow.git"
 export ZOPEN_DEV_DEPS="${ZOPEN_STABLE_DEPS}"
 
+# boost and googletest are here only because ARROW_BUILD_TESTS is on --
+# Arrow pulls Boost in for its test utilities, not for the library itself.
 export ZOPEN_RUNTIME_DEPS=""
 export ZOPEN_COMP="CLANG"
 
