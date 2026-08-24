@@ -61,7 +61,7 @@ export ZOPEN_CATEGORIES="development library"
 
 export ZOPEN_STABLE_URL="https://github.com/apache/arrow.git"
 export ZOPEN_STABLE_TAG="apache-arrow-${ARROW_VERSION}"
-export ZOPEN_STABLE_DEPS="zoslib make cmake xsimd snappy utf8proc zstd lz4 brotli"
+export ZOPEN_STABLE_DEPS="zoslib make cmake xsimd snappy utf8proc zstd lz4 bzip2 zlib googletest"
 
 export ZOPEN_DEV_URL="https://github.com/apache/arrow.git"
 export ZOPEN_DEV_DEPS="${ZOPEN_STABLE_DEPS}"
@@ -69,39 +69,79 @@ export ZOPEN_DEV_DEPS="${ZOPEN_STABLE_DEPS}"
 export ZOPEN_RUNTIME_DEPS=""
 export ZOPEN_COMP="CLANG"
 
+# -faligned-allocation goes here, not in -DCMAKE_CXX_FLAGS. CMake seeds
+# CMAKE_CXX_FLAGS from the environment CXXFLAGS on the first configure, but
+# passing -DCMAKE_CXX_FLAGS replaces it -- which would silently drop everything
+# zopen composes there, including zoslib -isystem path, its ZOSLIB_OVERRIDE_CLIB
+# defines and its symbolfixes force-include. Losing those does not fail at
+# configure; it fails much later with zoslib own time.h reporting
+# "unknown type name time_t", which reads as a broken compiler.
+#
+# The xsimd force-include arrives the same way, from xsimdport.
+export ZOPEN_EXTRA_CXXFLAGS="-faligned-allocation"
+
 # Arrow's CMakeLists is in cpp/, not at the top of the repo.
+#
+# The compression libraries are named explicitly rather than left to discovery.
+# Arrow's Find*Alt modules build library names that do not match what these
+# ports install, so a plain prefix path finds the headers and then reports
+# "Could NOT find lz4Alt (missing: LZ4_LIB)". The *_HOME variables come from
+# each dependency own environment.
+#
+# Everything is SYSTEM because nothing can be downloaded here: CMake's
+# FetchContent fails TLS verification (status_code 60) even though curl works,
+# so a BUNDLED dependency is a build failure rather than a slow build.
 export ZOPEN_CONFIGURE="cmake"
 export ZOPEN_CONFIGURE_OPTS="-S cpp -B ../build --install-prefix \"\$ZOPEN_INSTALL_DIR/\" \
  -DCMAKE_BUILD_TYPE=Release \
  -DCMAKE_CXX_STANDARD=20 \
- -DCMAKE_CXX_FLAGS=\"-faligned-allocation\" \
  -DCMAKE_AR=/bin/ar -DCMAKE_RANLIB=/bin/true \
  -DARROW_CPU_FLAG=s390x \
- -DARROW_DEPENDENCY_SOURCE=BUNDLED -Dxsimd_SOURCE=SYSTEM \
+ -DARROW_DEPENDENCY_SOURCE=SYSTEM -Dxsimd_SOURCE=SYSTEM \
+ -DLZ4_LIB=\$LZ4_HOME/lib/liblz4.a -DLZ4_INCLUDE_DIR=\$LZ4_HOME/include \
+ -DSnappy_LIB=\$SNAPPY_HOME/lib/libsnappy.a -DSnappy_INCLUDE_DIR=\$SNAPPY_HOME/include \
+ -DZSTD_LIB=\$ZSTD_HOME/lib/libzstd.a -DZSTD_INCLUDE_DIR=\$ZSTD_HOME/include \
+ -Dutf8proc_LIB=\$UTF8PROC_HOME/lib/libutf8proc.a -Dutf8proc_INCLUDE_DIR=\$UTF8PROC_HOME/include \
+ -DBZIP2_LIBRARIES=\$BZIP2_HOME/lib/libbz2.a -DBZIP2_INCLUDE_DIR=\$BZIP2_HOME/include \
+ -DZLIB_LIBRARY=\$ZLIB_HOME/lib/libz.a -DZLIB_INCLUDE_DIR=\$ZLIB_HOME/include \
  -DARROW_BUILD_SHARED=OFF -DARROW_BUILD_STATIC=ON \
- -DARROW_BUILD_TESTS=OFF -DARROW_BUILD_BENCHMARKS=OFF \
+ -DARROW_BUILD_TESTS=ON -DARROW_BUILD_BENCHMARKS=OFF \
  -DARROW_BUILD_EXAMPLES=OFF -DARROW_BUILD_UTILITIES=OFF \
  -DARROW_COMPUTE=OFF -DARROW_CSV=OFF -DARROW_JSON=OFF \
  -DARROW_FILESYSTEM=OFF -DARROW_PARQUET=OFF -DARROW_DATASET=OFF \
  -DARROW_ACERO=OFF -DARROW_FLIGHT=OFF -DARROW_S3=OFF -DARROW_GCS=OFF \
  -DARROW_JEMALLOC=OFF -DARROW_MIMALLOC=OFF \
- -DARROW_WITH_SNAPPY=OFF -DARROW_WITH_ZSTD=OFF -DARROW_WITH_LZ4=OFF \
- -DARROW_WITH_BROTLI=OFF -DARROW_WITH_BZ2=OFF -DARROW_WITH_ZLIB=OFF \
- -DARROW_WITH_UTF8PROC=OFF -DARROW_WITH_RE2=OFF"
+ -DARROW_WITH_SNAPPY=ON -DARROW_WITH_ZSTD=ON -DARROW_WITH_LZ4=ON \
+ -DARROW_WITH_BZ2=ON -DARROW_WITH_ZLIB=ON -DARROW_WITH_UTF8PROC=ON \
+ -DARROW_WITH_BROTLI=OFF -DARROW_WITH_RE2=OFF"
 
 export ZOPEN_MAKE="cmake"
 export ZOPEN_MAKE_OPTS="--build ../build --parallel \$ZOPEN_NUM_JOBS --config Release"
 export ZOPEN_MAKE_MINIMAL=Y
 export ZOPEN_INSTALL="cmake"
 export ZOPEN_INSTALL_OPTS="--install ../build"
-export ZOPEN_CHECK="skip"
+# Run Arrow's own test suite. This is the point of the exercise: everything
+# else establishes that the library compiles and that a couple of array types
+# round-trip, which is not the same as every byte-order path being right on a
+# big-endian machine.
+export ZOPEN_CHECK="ctest"
+export ZOPEN_CHECK_OPTS="--test-dir ../build --output-on-failure"
 
 zopen_check_results() {
+  dir="$1"; pfx="$2"; chk="${dir}/${pfx}_check.log"
+  if [ -f "${chk}" ]; then
+    total=$(grep -cE "Test +#" "${chk}" 2> /dev/null)
+    failed=$(grep -cE "\*\*\*Failed|Subprocess aborted" "${chk}" 2> /dev/null)
+    skipped=$(grep -c "Skipped" "${chk}" 2> /dev/null)
+    total=${total:-0}; failed=${failed:-0}; skipped=${skipped:-0}
+    passed=$((total - failed - skipped))
+  else
+    total=0; passed=0; failed=0
+  fi
 cat <<ZZ
-actualFailures:0
-totalTests:1
+actualFailures:${failed}
+totalTests:${total}
 expectedFailures:0
-expectedTotalTests:1
 ZZ
 }
 
