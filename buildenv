@@ -1,0 +1,119 @@
+# bump: arrow-version /ARROW_VERSION="(.*)"/ https://github.com/apache/arrow.git|semver:*
+ARROW_VERSION="25.0.1"
+
+###
+### Apache Arrow C++, built as a static library for pyarrow to link against.
+### pyarrow cannot build this itself -- its CMakeLists does find_package(Arrow
+### REQUIRED) -- so the C++ library has to exist first, which is why these are
+### two ports rather than one. Arrow C++ is also interpreter-independent, while
+### pyarrow builds a wheel per ABI; bundling would rebuild a very large C++
+### project three times for nothing.
+###
+### THIS PORT DOES NOT BUILD YET. It configures, and 60 source files compile
+### before two blockers stop it. Both are recorded in the README with the exact
+### errors. The port exists so the configure recipe below -- which took several
+### rounds to find and none of whose settings are guessable -- is written down
+### and reproducible.
+###
+### The settings that are load-bearing, in the order they were discovered:
+###
+###   ARROW_CPU_FLAG=s390x
+###     CMake reports CMAKE_SYSTEM_PROCESSOR as the machine type ("8561"),
+###     which Arrow does not recognise: "Unknown system processor". Arrow does
+###     have an s390x path -- IBM contributed it -- and the detection is
+###     guarded by if(NOT DEFINED ARROW_CPU_FLAG), so naming it directly skips
+###     the detection rather than patching it.
+###
+###   CMAKE_CXX_STANDARD=20
+###     Arrow 25 requires it: "Cannot set a CMAKE_CXX_STANDARD smaller than 20".
+###     Verified working on this compiler -- concepts, std::span, __cplusplus
+###     202002.
+###
+###   CMAKE_RANLIB=/bin/true
+###     There is no ranlib here; ar maintains the index itself, as on AIX.
+###     CMAKE_RANLIB ends up as ":" and Arrow does find_program() on it:
+###     "Could not find EP_CMAKE_RANLIB using the following names: :".
+###
+###   -faligned-allocation
+###     Without it every file that news an over-aligned type fails with
+###     "aligned allocation function of type ... is only available on",
+###     starting with memory_pool.cc.
+###
+###   -include <xsimd-zos-defaults.h>, from the xsimd port
+###     Arrow requires xsimd and uses batches in its kernels. On this platform
+###     xsimd only works through its emulated backend, and the settings that
+###     select it cannot be passed as -D flags -- the value contains angle
+###     brackets, so a build system passing it through a shell turns "<128>"
+###     into a redirection and the compiler probe fails with
+###     'bad file descriptor "128"'. xsimdport delivers them as a force-include
+###     header and exports it, so listing xsimd as a dependency is enough.
+###
+###   xsimd_SOURCE=SYSTEM
+###     Otherwise Arrow tries to download its own copy, which fails here.
+###     Using the port is better anyway: it is the one that works.
+###
+
+export ZOPEN_PROJECT_NAME="arrow"
+export ZOPEN_BUILD_LINE="STABLE"
+export ZOPEN_CATEGORIES="development library"
+
+export ZOPEN_STABLE_URL="https://github.com/apache/arrow.git"
+export ZOPEN_STABLE_TAG="apache-arrow-${ARROW_VERSION}"
+export ZOPEN_STABLE_DEPS="zoslib make cmake xsimd snappy utf8proc zstd lz4 brotli"
+
+export ZOPEN_DEV_URL="https://github.com/apache/arrow.git"
+export ZOPEN_DEV_DEPS="${ZOPEN_STABLE_DEPS}"
+
+export ZOPEN_RUNTIME_DEPS=""
+export ZOPEN_COMP="CLANG"
+
+# Arrow's CMakeLists is in cpp/, not at the top of the repo.
+export ZOPEN_CONFIGURE="cmake"
+export ZOPEN_CONFIGURE_OPTS="-S cpp -B ../build --install-prefix \"\$ZOPEN_INSTALL_DIR/\" \
+ -DCMAKE_BUILD_TYPE=Release \
+ -DCMAKE_CXX_STANDARD=20 \
+ -DCMAKE_CXX_FLAGS=\"-faligned-allocation\" \
+ -DCMAKE_AR=/bin/ar -DCMAKE_RANLIB=/bin/true \
+ -DARROW_CPU_FLAG=s390x \
+ -DARROW_DEPENDENCY_SOURCE=BUNDLED -Dxsimd_SOURCE=SYSTEM \
+ -DARROW_BUILD_SHARED=OFF -DARROW_BUILD_STATIC=ON \
+ -DARROW_BUILD_TESTS=OFF -DARROW_BUILD_BENCHMARKS=OFF \
+ -DARROW_BUILD_EXAMPLES=OFF -DARROW_BUILD_UTILITIES=OFF \
+ -DARROW_COMPUTE=OFF -DARROW_CSV=OFF -DARROW_JSON=OFF \
+ -DARROW_FILESYSTEM=OFF -DARROW_PARQUET=OFF -DARROW_DATASET=OFF \
+ -DARROW_ACERO=OFF -DARROW_FLIGHT=OFF -DARROW_S3=OFF -DARROW_GCS=OFF \
+ -DARROW_JEMALLOC=OFF -DARROW_MIMALLOC=OFF \
+ -DARROW_WITH_SNAPPY=OFF -DARROW_WITH_ZSTD=OFF -DARROW_WITH_LZ4=OFF \
+ -DARROW_WITH_BROTLI=OFF -DARROW_WITH_BZ2=OFF -DARROW_WITH_ZLIB=OFF \
+ -DARROW_WITH_UTF8PROC=OFF -DARROW_WITH_RE2=OFF"
+
+export ZOPEN_MAKE="cmake"
+export ZOPEN_MAKE_OPTS="--build ../build --parallel \$ZOPEN_NUM_JOBS --config Release"
+export ZOPEN_MAKE_MINIMAL=Y
+export ZOPEN_INSTALL="cmake"
+export ZOPEN_INSTALL_OPTS="--install ../build"
+export ZOPEN_CHECK="skip"
+
+zopen_check_results() {
+cat <<ZZ
+actualFailures:0
+totalTests:1
+expectedFailures:0
+expectedTotalTests:1
+ZZ
+}
+
+zopen_append_to_env() {
+cat <<ZZ
+if [ ! -z "\$ZOPEN_IN_ZOPEN_BUILD" ]; then
+  export ZOPEN_EXTRA_CXXFLAGS="\${ZOPEN_EXTRA_CXXFLAGS} -I\$PWD/include"
+  export ZOPEN_EXTRA_LDFLAGS="\${ZOPEN_EXTRA_LDFLAGS} -L\$PWD/lib"
+  export ZOPEN_EXTRA_LIBS="\${ZOPEN_EXTRA_LIBS} -larrow"
+  export ARROW_HOME="\$PWD"
+fi
+ZZ
+}
+
+zopen_get_version() {
+  echo "${ARROW_VERSION}"
+}
