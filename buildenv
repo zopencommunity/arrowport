@@ -2,22 +2,32 @@
 ARROW_VERSION="25.0.1"
 
 ###
-### Apache Arrow C++, built as a static library for pyarrow to link against.
+### Apache Arrow C++, built as a SHARED library for pyarrow to link against.
 ### pyarrow cannot build this itself -- its CMakeLists does find_package(Arrow
 ### REQUIRED) -- so the C++ library has to exist first, which is why these are
 ### two ports rather than one. Arrow C++ is also interpreter-independent, while
 ### pyarrow builds a wheel per ABI; bundling would rebuild a very large C++
 ### project three times for nothing.
 ###
-### It builds. libarrow.a comes out at ~40 MB and a program linked against it
-### produces correct results on this byte order -- int64 arithmetic and string
-### offsets both verified, the latter being where endianness actually bites.
+### It must be SHARED, and that is not a preference. pyarrow links Arrow into
+### libarrow_python and, when Arrow is static, upstream links it PRIVATE
+### (python/CMakeLists.txt ~526) on the assumption that ELF re-exports those
+### symbols to the Cython extension modules. z/OS DLLs export only what is
+### explicitly exported, through a side deck, so with a static Arrow every Arrow
+### symbol comes back UNRESOLVED when the extensions link -- starting with
+### arrow::compute::Initialize. Verified: shared Arrow builds and pyarrow then
+### imports and runs.
+###
+### libarrow.so comes out at ~50 MB and libarrow_compute.so at ~34 MB, and a
+### program linked against them produces correct results on this byte order --
+### int64 arithmetic and string offsets both verified, the latter being where
+### endianness actually bites.
 ###
 ### Six patches were needed, all of them platform differences rather than Arrow
 ### bugs; patches/arrow-25.0.1-zos.patch carries them and the README explains
 ### each one.
 ###
-### The settings that are load-bearing### The settings that are load-bearing, in the order they were discovered:
+### The settings that are load-bearing, in the order they were discovered:covered:
 ###
 ###   ARROW_CPU_FLAG=s390x
 ###     CMake reports CMAKE_SYSTEM_PROCESSOR as the machine type ("8561"),
@@ -61,7 +71,7 @@ export ZOPEN_CATEGORIES="development library"
 
 export ZOPEN_STABLE_URL="https://github.com/apache/arrow.git"
 export ZOPEN_STABLE_TAG="apache-arrow-${ARROW_VERSION}"
-export ZOPEN_STABLE_DEPS="zoslib make cmake xsimd snappy utf8proc zstd lz4 bzip2 zlib"
+export ZOPEN_STABLE_DEPS="zoslib make cmake xsimd snappy utf8proc zstd lz4 bzip2 zlib rapidjson"
 
 export ZOPEN_DEV_URL="https://github.com/apache/arrow.git"
 export ZOPEN_DEV_DEPS="${ZOPEN_STABLE_DEPS}"
@@ -78,7 +88,39 @@ export ZOPEN_COMP="CLANG"
 # "unknown type name time_t", which reads as a broken compiler.
 #
 # The xsimd force-include arrives the same way, from xsimdport.
-export ZOPEN_EXTRA_CXXFLAGS="-faligned-allocation"
+#
+# -DDATE_BUILD_DLL makes Arrow's vendored date library export its symbols.
+#
+# tz.h defines DATE_API as __attribute__((visibility("default"))) only when
+# DATE_BUILD_DLL is set, and as nothing otherwise. On ELF that costs nothing --
+# default visibility is exported anyway. Here, a DLL exports only what is
+# explicitly marked, so without it libarrow_compute.so cannot bind to
+# libarrow.so and the link fails with
+#
+#   IEW2456E SYMBOL _ZNK14arrow_vendored4date9time_zone13get_info_impl...
+#            UNRESOLVED. MEMBER COULD NOT BE INCLUDED FROM THE DESIGNATED
+#            CALL LIBRARY.
+#
+# even though nm shows the symbol present and defined (T) inside libarrow.so.
+export ZOPEN_EXTRA_CXXFLAGS="-faligned-allocation -DDATE_BUILD_DLL"
+
+# Do not link zopen's zoslib environment hook into these libraries.
+#
+# zopen normally generates .zoslib_hooks/zoslib_env_hook.o and appends it to
+# every link, so that zoslib can set environment variables before main runs.
+# That is right for an executable and wrong for a DLL: when Python dlopen's an
+# extension that depends on libarrow.so, the hook runs during load and abends
+#
+#   CEE3250C The system or user abend U4093 R=000000CC was issued.
+#            From entry point zoslib_env_hook ...
+#
+# with no Python traceback. It is hard to attribute because the module that
+# appears to fail does not define the symbol -- it is resolved out of
+# libarrow.so -- so nm points at the wrong file.
+#
+# zopen-build supports suppressing it, which is preferable to editing the link
+# line after the fact.
+export ZOPEN_SKIP_ZOSLIB_ENV_HOOK=1
 
 # Arrow's CMakeLists is in cpp/, not at the top of the repo.
 #
@@ -118,11 +160,12 @@ export ZOPEN_CONFIGURE_OPTS="-S cpp -B ../build --install-prefix \"\$ZOPEN_INSTA
  -DBZIP2_LIBRARY_RELEASE=\$BZIP2_HOME/lib/libbz2.a \
  -DBZIP2_LIBRARIES=\$BZIP2_HOME/lib/libbz2.a -DBZIP2_INCLUDE_DIR=\$BZIP2_HOME/include \
  -DZLIB_LIBRARY=\$ZLIB_HOME/lib/libz.a -DZLIB_INCLUDE_DIR=\$ZLIB_HOME/include \
- -DARROW_BUILD_SHARED=OFF -DARROW_BUILD_STATIC=ON \
+ -DRapidJSON_ROOT=\$RAPIDJSON_HOME \
+ -DARROW_BUILD_SHARED=ON -DARROW_BUILD_STATIC=OFF \
  -DARROW_BUILD_TESTS=OFF -DARROW_BUILD_BENCHMARKS=OFF \
  -DARROW_BUILD_EXAMPLES=OFF -DARROW_BUILD_UTILITIES=OFF \
- -DARROW_COMPUTE=ON -DARROW_CSV=ON -DARROW_JSON=OFF \
- -DARROW_FILESYSTEM=OFF -DARROW_PARQUET=OFF -DARROW_DATASET=OFF \
+ -DARROW_COMPUTE=ON -DARROW_CSV=ON -DARROW_JSON=ON -DARROW_IPC=ON \
+ -DARROW_FILESYSTEM=ON -DARROW_PARQUET=OFF -DARROW_DATASET=OFF \
  -DARROW_ACERO=OFF -DARROW_FLIGHT=OFF -DARROW_S3=OFF -DARROW_GCS=OFF \
  -DARROW_JEMALLOC=OFF -DARROW_MIMALLOC=OFF \
  -DARROW_WITH_SNAPPY=ON -DARROW_WITH_ZSTD=ON -DARROW_WITH_LZ4=ON \
@@ -143,11 +186,11 @@ export ZOPEN_INSTALL_OPTS="--install ../build"
 # It is parked rather than abandoned because turning it on is not free:
 #
 #   ARROW_BUILD_TESTS=ON sets ARROW_TESTING, which makes Arrow require Boost.
-#   Headers only, as it happens -- the branch wanting boost::filesystem needs
-#   ARROW_BUILD_SHARED, and this port is static, so the component list comes
-#   out empty and nothing links a Boost library. Verified: zero references to
-#   any libboost*.a in the generated build. So the incomplete parts of the
-#   boost port are parts this would not touch.
+#   That analysis was done when this port built static, and it no longer holds:
+#   the branch wanting boost::filesystem is gated on ARROW_BUILD_SHARED, which
+#   is now ON. When tests are revisited, the Boost component list has to be
+#   re-checked rather than assumed empty -- the earlier "headers only" finding
+#   was a consequence of the static build, not a property of Arrow.
 #
 #   GTest is the actual blocker. Arrow probes it with FindGTestAlt and the
 #   probe fails:
@@ -199,6 +242,58 @@ zopen_pre_configure() {
   return 0
 }
 
+# Install the DLLs, which CMake does not.
+#
+# A SHARED target on this platform produces two artifacts: the DLL (libarrow.so)
+# and a side deck (libarrow.x) that consumers link against. CMake's z/OS support
+# maps both the ARCHIVE and the LIBRARY/RUNTIME destinations to the side deck --
+# the generated cmake_install.cmake carries
+#
+#   file(INSTALL ... TYPE STATIC_LIBRARY ... "libarrow.x")
+#
+# twice and nothing for the .so. The install therefore looks complete, and link
+# time still works because the side decks are present; only loading fails, with
+#
+#   CEE3501S The module libarrow.so was not found.
+#
+# so the gap would otherwise surface in a dependent port rather than here.
+zopen_post_install() {
+  _ar_lib="${ZOPEN_INSTALL_DIR}/lib"
+  _ar_built="${ZOPEN_ROOT}/build/release"
+
+  printHeader "Installing the shared libraries CMake left behind"
+  if [ ! -d "${_ar_built}" ]; then
+    printSoftError "build output directory ${_ar_built} does not exist"
+    return 1
+  fi
+
+  _ar_n=0
+  for _ar_so in "${_ar_built}"/*.so; do
+    [ -f "${_ar_so}" ] || continue
+    cp "${_ar_so}" "${_ar_lib}/" || return 1
+    printInfo "- installed $(basename "${_ar_so}")"
+    _ar_n=$((_ar_n + 1))
+  done
+
+  if [ "${_ar_n}" -eq 0 ]; then
+    printSoftError "FAIL: no .so files were produced in ${_ar_built}"
+    return 1
+  fi
+
+  # Every side deck must have its DLL beside it. A side deck without one is the
+  # failure described above: it links and then cannot load.
+  for _ar_x in "${_ar_lib}"/*.x; do
+    [ -f "${_ar_x}" ] || continue
+    _ar_base=$(basename "${_ar_x}" .x)
+    if [ ! -f "${_ar_lib}/${_ar_base}.so" ]; then
+      printSoftError "FAIL: ${_ar_base}.x has no ${_ar_base}.so beside it"
+      return 1
+    fi
+  done
+  printInfo "PASS: ${_ar_n} shared libraries installed, each with its side deck"
+  return 0
+}
+
 zopen_check_results() {
 cat <<ZZ
 actualFailures:0
@@ -208,14 +303,29 @@ expectedTotalTests:1
 ZZ
 }
 
+# LIBPATH matters here in a way it does not on Linux.
+#
+# Arrow is now a set of DLLs, and z/OS resolves them at run time through LIBPATH
+# only -- there is no $ORIGIN and no rpath (the linker rejects -rpath outright:
+# "IEW5003 -r is not a valid option"). Anything that loads libarrow.so, including
+# a pyarrow extension module imported by Python, needs this directory on LIBPATH
+# or fails with
+#
+#   CEE3501S The module libarrow.so was not found.
 zopen_append_to_env() {
 cat <<ZZ
 if [ ! -z "\$ZOPEN_IN_ZOPEN_BUILD" ]; then
   export ZOPEN_EXTRA_CXXFLAGS="\${ZOPEN_EXTRA_CXXFLAGS} -I\$PWD/include"
   export ZOPEN_EXTRA_LDFLAGS="\${ZOPEN_EXTRA_LDFLAGS} -L\$PWD/lib"
-  export ZOPEN_EXTRA_LIBS="\${ZOPEN_EXTRA_LIBS} -larrow"
+  # The side deck, not -larrow. On z/OS "-l<name>" resolves to lib<name>.a, and
+  # this port no longer builds a static archive, so -larrow breaks every link in
+  # a dependent port -- including CMake's own compiler test, which fails the
+  # configure with "IEW5034 The archive library libarrow.a cannot be found."
+  # long before the project's own sources are reached.
+  export ZOPEN_EXTRA_LIBS="\${ZOPEN_EXTRA_LIBS} \$PWD/lib/libarrow.x"
   export ARROW_HOME="\$PWD"
 fi
+export LIBPATH="\$PWD/lib:\$LIBPATH"
 ZZ
 }
 
