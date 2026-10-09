@@ -1,5 +1,5 @@
 # bump: arrow-version /ARROW_VERSION="(.*)"/ https://github.com/apache/arrow.git|semver:*
-ARROW_VERSION="25.0.1"
+ARROW_VERSION="26.0.0"
 
 ###
 ### Apache Arrow C++, built as a SHARED library for pyarrow to link against.
